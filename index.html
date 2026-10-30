@@ -38,7 +38,6 @@
   .btn-primary:not(:disabled):hover{background:var(--accent2)}
   .btn-ghost{background:var(--panel2);color:var(--txt);border:1px solid var(--line)}
   .btn-ghost:not(:disabled):hover{border-color:var(--accent)}
-  .btn-danger{background:transparent;color:var(--err);border:1px solid var(--err)}
   .status{display:flex;align-items:center;gap:8px;font-size:14px}
   .dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
   .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
@@ -57,6 +56,7 @@
   .banner.warn{background:rgba(245,158,11,.12);border:1px solid var(--warn);color:#fcd34d}
   code{font-family:var(--mono);background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:.92em}
   a{color:var(--accent)}
+  .hidden{display:none}
 </style>
 </head>
 <body>
@@ -88,27 +88,42 @@
     <div class="hint">Colokkan ESP32 via USB, klik <b>Hubungkan</b>, lalu pilih port COM-nya di dialog browser.</div>
   </div>
 
-  <!-- Step 2: File + options -->
+  <!-- Step 2: Firmware -->
   <div class="card">
-    <h2>2 · Pilih firmware & opsi</h2>
+    <h2>2 · Pilih firmware</h2>
+
     <label class="field">
-      <span>File firmware (.bin)</span>
-      <input type="file" id="fileInput" accept=".bin" />
+      <span>Sumber firmware</span>
+      <select id="fwSource"></select>
     </label>
+
+    <!-- dari file PC -->
+    <div id="srcFile" class="hidden">
+      <input type="file" id="fileInput" accept=".bin" />
+    </div>
+
+    <!-- dari URL manual -->
+    <div id="srcUrl" class="hidden">
+      <div class="row">
+        <input type="text" id="urlInput" placeholder="https://.../firmware.bin" style="flex:1;min-width:200px" />
+        <button id="urlLoadBtn" class="btn-ghost">Muat</button>
+      </div>
+    </div>
+
     <div id="fileInfo" class="hint"></div>
 
-    <div class="grid2" style="margin-top:6px">
+    <div class="grid2" style="margin-top:14px">
       <label class="field" style="margin:0">
         <span>Alamat flash</span>
         <select id="addrPreset">
-          <option value="0x10000">0x10000 — firmware aplikasi saja</option>
           <option value="0x0">0x0 — file gabungan (merged.bin)</option>
+          <option value="0x10000">0x10000 — firmware aplikasi saja</option>
           <option value="custom">Custom…</option>
         </select>
       </label>
       <label class="field" style="margin:0">
         <span>Alamat custom (hex)</span>
-        <input type="text" id="addrCustom" value="0x10000" disabled />
+        <input type="text" id="addrCustom" value="0x0" disabled />
       </label>
     </div>
 
@@ -144,17 +159,27 @@
   </div>
 
   <div class="hint">
-    Butuh <b>Google Chrome</b> atau <b>Microsoft Edge</b> (Web Serial API). Firefox/Safari belum didukung.
+    Butuh <b>Google Chrome</b> atau <b>Microsoft Edge</b> (Web Serial API) dan diakses lewat <b>https://</b> atau file lokal.
     Tutup Serial Monitor Arduino dulu agar port tidak bentrok.
   </div>
 </div>
 
 <script type="module">
-  // esptool-js 0.6.0 (ESM dari CDN jsDelivr)
+  // =========================================================================
+  // DAFTAR FIRMWARE — edit bagian ini.
+  // Taruh file .bin di repo GitHub yang sama (mis. folder "firmware/"),
+  // lalu tulis path/URL-nya di sini. Path relatif = file di repo yang sama.
+  // =========================================================================
+  const FIRMWARES = [
+    { name: "Air Quality Monitor",       url: "AirQualityESP32.merged.bin", address: 0x0 },
+    { name: "Maps TFT Auto (GPS + BT)",  url: "MapsTFT_Auto.merged.bin",    address: 0x0 },
+    // { name: "Project lain", url: "namafile.merged.bin", address: 0x0 },
+  ];
+  // =========================================================================
+
   let ESPLoader, Transport;
   const $ = (id) => document.getElementById(id);
   const logEl = $("log");
-
   function log(msg){ logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; }
   const terminal = {
     clean(){ logEl.textContent = ""; },
@@ -162,13 +187,13 @@
     write(d){ logEl.textContent += d; logEl.scrollTop = logEl.scrollHeight; },
   };
 
-  // --- compatibility check ---
+  // compatibility
   const banner = $("compatBanner");
   if(!("serial" in navigator)){
     if(!window.isSecureContext){
-      banner.innerHTML = "<b>Web Serial nonaktif: koneksi tidak aman.</b><br>Halaman ini dibuka lewat <code>http://</code> biasa. Web Serial hanya aktif di <b>https://</b>, <b>http://localhost</b>, atau file lokal (<code>file://</code>). Unggah ke hosting ber-HTTPS (GitHub Pages / Netlify / Cloudflare Pages) atau pasang SSL di server.";
+      banner.innerHTML = "<b>Web Serial nonaktif: koneksi tidak aman.</b><br>Halaman dibuka lewat <code>http://</code> biasa. Web Serial hanya aktif di <b>https://</b>, <b>http://localhost</b>, atau file lokal (<code>file://</code>).";
     } else {
-      banner.textContent = "Browser ini tidak mendukung Web Serial API. Pakai Google Chrome atau Microsoft Edge versi desktop terbaru (Firefox/Safari belum didukung).";
+      banner.textContent = "Browser ini tidak mendukung Web Serial API. Pakai Google Chrome atau Microsoft Edge versi desktop terbaru.";
     }
     banner.classList.add("show");
   }
@@ -183,12 +208,14 @@
     log("ERROR memuat esptool-js: " + e.message);
   }
 
-  // --- state ---
+  // state
   let port=null, transport=null, esploader=null, connected=false, fileBytes=null;
 
-  // --- UI refs ---
+  // refs
   const connectBtn=$("connectBtn"), disconnectBtn=$("disconnectBtn"),
         flashBtn=$("flashBtn"), fileInput=$("fileInput"),
+        fwSource=$("fwSource"), srcFile=$("srcFile"), srcUrl=$("srcUrl"),
+        urlInput=$("urlInput"), urlLoadBtn=$("urlLoadBtn"),
         addrPreset=$("addrPreset"), addrCustom=$("addrCustom"),
         dot=$("dot"), statusTxt=$("statusTxt"), chipTxt=$("chipTxt"),
         barFill=$("barFill"), pct=$("pct"), baudSel=$("baud"), eraseAll=$("eraseAll");
@@ -197,27 +224,70 @@
     dot.className = "dot" + (state==="on"?" on":state==="busy"?" busy":"");
     statusTxt.textContent = txt;
   }
-  function refreshFlashBtn(){
-    flashBtn.disabled = !(connected && fileBytes);
+  function refreshFlashBtn(){ flashBtn.disabled = !(connected && fileBytes); }
+  function setAddress(a){
+    const hex = "0x" + a.toString(16);
+    const opt = [...addrPreset.options].find(o=>o.value===hex);
+    if(opt){ addrPreset.value=hex; addrCustom.disabled=true; addrCustom.value=hex; }
+    else { addrPreset.value="custom"; addrCustom.disabled=false; addrCustom.value=hex; }
   }
 
-  // --- address preset ---
+  // build firmware dropdown
+  FIRMWARES.forEach((fw,i)=>{
+    const o=document.createElement("option"); o.value="fw:"+i; o.textContent=fw.name; fwSource.appendChild(o);
+  });
+  fwSource.appendChild(new Option("📁 Dari file di komputer…","file"));
+  fwSource.appendChild(new Option("🔗 Dari URL…","url"));
+
+  async function loadFromUrl(url){
+    fileBytes=null; refreshFlashBtn();
+    $("fileInfo").textContent = "Mengunduh firmware…";
+    try{
+      const r = await fetch(url, {cache:"no-store"});
+      if(!r.ok) throw new Error("HTTP "+r.status+" "+r.statusText);
+      const buf = await r.arrayBuffer();
+      fileBytes = new Uint8Array(buf);
+      $("fileInfo").textContent = `✓ ${url.split("/").pop()} — ${(fileBytes.length/1024).toFixed(1)} KB`;
+      log("Firmware dimuat dari: " + url + " (" + fileBytes.length + " byte)");
+      refreshFlashBtn();
+    }catch(e){
+      $("fileInfo").textContent = "✗ Gagal memuat: " + (e.message||e);
+      log("ERROR unduh firmware: " + (e.message||e) + "  (cek URL / file ada di repo / koneksi)");
+    }
+  }
+
+  async function onSourceChange(){
+    const v = fwSource.value;
+    srcFile.classList.toggle("hidden", v!=="file");
+    srcUrl.classList.toggle("hidden", v!=="url");
+    if(v.startsWith("fw:")){
+      const fw = FIRMWARES[+v.slice(3)];
+      setAddress(fw.address ?? 0x0);
+      await loadFromUrl(fw.url);
+    } else {
+      fileBytes=null; $("fileInfo").textContent=""; refreshFlashBtn();
+    }
+  }
+  fwSource.addEventListener("change", onSourceChange);
+
+  urlLoadBtn.addEventListener("click", ()=>{
+    const u = urlInput.value.trim();
+    if(u) loadFromUrl(u); else alert("Masukkan URL file .bin dulu.");
+  });
+
   addrPreset.addEventListener("change", ()=>{
     if(addrPreset.value==="custom"){ addrCustom.disabled=false; addrCustom.focus(); }
     else { addrCustom.disabled=true; addrCustom.value=addrPreset.value; }
   });
 
-  // --- file pick ---
   fileInput.addEventListener("change", async ()=>{
     const f = fileInput.files[0];
     if(!f){ fileBytes=null; $("fileInfo").textContent=""; refreshFlashBtn(); return; }
-    const buf = await f.arrayBuffer();
-    fileBytes = new Uint8Array(buf);
+    fileBytes = new Uint8Array(await f.arrayBuffer());
     $("fileInfo").textContent = `${f.name} — ${(fileBytes.length/1024).toFixed(1)} KB`;
     refreshFlashBtn();
   });
 
-  // --- connect ---
   connectBtn.addEventListener("click", async ()=>{
     if(!ESPLoader){ alert("Library belum termuat. Periksa koneksi internet lalu muat ulang."); return; }
     try{
@@ -229,71 +299,65 @@
       setStatus("busy","Menyambung & mendeteksi chip…");
       const chip = await esploader.main();
       connected = true;
-      setStatus("on","Terhubung");
-      chipTxt.textContent = "· " + chip;
+      setStatus("on","Terhubung"); chipTxt.textContent = "· " + chip;
       connectBtn.disabled=true; disconnectBtn.disabled=false;
       log("Terhubung ke: " + chip);
       refreshFlashBtn();
     }catch(e){
       setStatus("", "Gagal terhubung");
-      const msg = (e.message||String(e));
-      log("ERROR connect: " + msg);
-      if(/head of packet|noise or corruption|verify flash|lower baud/i.test(msg)){
-        log("➤ Saran: turunkan Baud rate ke 115200, lalu Hubungkan lagi. Kabel/driver CP210x sering tidak stabil di baud tinggi.");
-      }
+      const msg=(e.message||String(e)); log("ERROR connect: " + msg);
+      if(/head of packet|noise or corruption|verify flash|lower baud/i.test(msg))
+        log("➤ Saran: turunkan Baud rate ke 115200, lalu Hubungkan lagi.");
       try{ await transport?.disconnect(); }catch(_){}
       port=null; transport=null; esploader=null; connected=false;
       connectBtn.disabled=false; disconnectBtn.disabled=true;
     }
   });
 
-  // --- disconnect ---
   disconnectBtn.addEventListener("click", async ()=>{
     try{ await transport?.disconnect(); }catch(_){}
     connected=false; port=null; transport=null; esploader=null;
     setStatus("","Belum terhubung"); chipTxt.textContent="";
     connectBtn.disabled=false; disconnectBtn.disabled=true;
-    refreshFlashBtn();
-    log("Port diputus.");
+    refreshFlashBtn(); log("Port diputus.");
   });
 
-  // --- flash ---
   flashBtn.addEventListener("click", async ()=>{
     if(!connected || !fileBytes){ return; }
     let addrStr = addrPreset.value==="custom" ? addrCustom.value.trim() : addrPreset.value;
     const address = parseInt(addrStr, 16);
-    if(Number.isNaN(address)){ alert("Alamat flash tidak valid. Contoh: 0x10000"); return; }
+    if(Number.isNaN(address)){ alert("Alamat flash tidak valid. Contoh: 0x0"); return; }
 
     flashBtn.disabled=true; connectBtn.disabled=true; disconnectBtn.disabled=true;
-    setStatus("busy","Mem-flash…");
-    barFill.style.width="0%"; pct.textContent="Mulai…";
+    setStatus("busy","Mem-flash…"); barFill.style.width="0%"; pct.textContent="Mulai…";
     log(`\n=== Flash ${fileBytes.length} byte @ 0x${address.toString(16)} (erase=${eraseAll.checked}) ===`);
-
     try{
       await esploader.writeFlash({
         fileArray:[{ data: fileBytes, address }],
         flashSize:"keep", flashMode:"keep", flashFreq:"keep",
         eraseAll: eraseAll.checked, compress:true,
         reportProgress:(idx,written,total)=>{
-          const p = Math.round(written/total*100);
+          const p=Math.round(written/total*100);
           barFill.style.width=p+"%"; pct.textContent=`${p}% (${written}/${total} byte)`;
         },
       });
       barFill.style.width="100%"; pct.textContent="Selesai ✓";
-      setStatus("on","Flash berhasil");
-      log("Flash selesai. Mereset perangkat…");
+      setStatus("on","Flash berhasil"); log("Flash selesai. Mereset perangkat…");
       try{ await esploader.after("hard_reset"); }catch(_){}
       log("Perangkat direset. Firmware berjalan.");
     }catch(e){
-      setStatus("on","Flash gagal");
-      pct.textContent="Gagal.";
-      log("ERROR flash: " + (e.message||e));
+      setStatus("on","Flash gagal"); pct.textContent="Gagal.";
+      const msg=(e.message||String(e)); log("ERROR flash: " + msg);
+      if(/head of packet|noise or corruption/i.test(msg))
+        log("➤ Saran: coba kabel USB lain / colok langsung ke laptop, atau turunkan baud.");
     }finally{
-      connectBtn.disabled = connected;  // tetap nonaktif jika masih terhubung
-      disconnectBtn.disabled = !connected;
-      refreshFlashBtn();
+      connectBtn.disabled=connected; disconnectBtn.disabled=!connected; refreshFlashBtn();
     }
   });
+
+  // init: pilih firmware pertama bila ada
+  if(FIRMWARES.length){ fwSource.value="fw:0"; } else { fwSource.value="file"; }
+  onSourceChange();
 </script>
 </body>
 </html>
